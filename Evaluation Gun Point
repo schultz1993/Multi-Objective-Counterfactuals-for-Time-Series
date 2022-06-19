@@ -1,0 +1,312 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Jun  3 00:46:58 2022
+
+@author: 46730
+"""
+
+from wildboar.ensemble import ShapeletForestClassifier
+from pymoo.algorithms.moo.nsga2 import NSGA2
+
+from pymoo.factory import get_crossover, get_mutation
+from pymoo.optimize import minimize
+from sklearn.neighbors import KNeighborsClassifier
+from wildboar.explain.counterfactual import KNeighborsCounterfactual
+#from wildboar.explain.counterfactual import score
+from wildboar.explain.counterfactual import ShapeletForestCounterfactual
+from wildboar.datasets import load_dataset
+
+#from wildboar.datasets import load_two_lead_ecg
+#from wildboar.datasets import load_Gun_Point
+from sklearn.model_selection import train_test_split
+from pymoo.problems.functional import FunctionalProblem
+import time
+from matplotlib import pyplot as plt
+import numpy as np
+
+
+random_state=1234
+
+
+x, y = x, y = load_dataset('GunPoint', repository='wildboar/ucr')
+x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=0.30, random_state=123)
+
+knn = KNeighborsClassifier(metric='euclidean')
+knn.fit(x_train, y_train)
+
+clf = ShapeletForestClassifier(metric="euclidean")
+clf.fit(x_train, y_train)
+pr = clf.predict(x_test)
+
+
+# The 3 Objective functions
+cos_t = []
+comp = []
+
+lst=[] 
+
+for i in range(len(y_test)):
+    if y_test[i]==1:
+      lst.append(x_test[i])  
+
+ser = np.array(lst)
+ser = ser[10:11]
+
+t0 = time.time()
+
+C2_av = 0
+C3_av = 0
+no_counterfactual = 0 
+classified_different = 0
+
+
+y_desired =[]
+
+for i in range(len(ser)):
+    y_desired.append(2)
+
+#y_desired = np.full((1, 2), 2, dtype=int)
+#y_desired = []
+#y_desired = np.array(y_desired)
+#=np.reshape(2,(1,len(y_desired)))
+#a = 1/0
+
+
+for ts1 in ser:
+    
+    ts1=np.reshape(ts1,(1,len(ts1)))
+
+    
+    
+    def prob_class(co):
+        
+        co = np.reshape(co,(1,len(co)))
+        #print('***')
+        #print(co[0][:10])
+        X1=1
+        if clf.predict(co)==2:    
+            X1=0   
+        return X1
+        
+    def dis_measure(co):
+        
+        X2=0
+        #print(ts1)
+        for i in range(len(ts1[0])):
+            X2 = X2 + abs((co[i] - ts1[0][i])) / abs(ts1[0][i])
+        X2 = X2 / len(co)
+        return X2
+    
+    def inst_change(co):
+        
+        count=0
+        
+        for i in range(len(ts1[0])):
+            if ts1[0][i] != co[i]:
+                count += 1
+    
+        X3 = count/len(ts1[0])
+        return X3
+    
+    
+    # Constraints
+    
+    def c1(co):
+        th = 0.3
+        count=0
+        for i in range(len(co)):
+            if co[i]==ts1[0][i]:
+                continue
+            else: count +=1
+        per_change = count/len(co)
+        ans = per_change - th
+        return ans
+    
+    def c2(co):
+        m_change = len(co)*0.1
+        shaplets=0
+        
+        if co[-1] != ts1[0][-1]:
+            shaplets += 1
+        
+        for i in range(len(co)-1):
+            if co[i+1] != ts1[0][i+1] and co[i] == ts1[0][i]:
+                shaplets += 1
+            else: continue
+        ans = shaplets - m_change
+        return ans
+    
+    def best_ts(ts,co):
+        
+        ser ={}
+        no_coun = 0
+        wrong_cla = 0
+        for i in range(len(co)):
+            ts_tot = 0
+            for j in range(len(co[i])):
+                ts_tot += co[i][j]
+            ser[i]=ts_tot
+        best_key = min(ser, key=ser.get)
+        
+        su = ser[best_key] 
+            
+        if su==0:
+            result = None
+            wrong_cla = 1
+            print(ser[best_key])
+        elif su==1:
+            result = None
+            no_coun = 1
+            print(ser[best_key])
+        else:
+            result = ts[best_key]
+        
+        return result,best_key,no_coun,wrong_cla    
+    
+    def cost(x_t,co):
+        res=0
+       
+        for i in range(len(co)):
+            e=0
+            for j in range(len(co[i])):
+                e = e + ((x_t[i][j]-co[i][j]))**2
+            res += np.sqrt(e)
+        res = (1/len(co)) * res
+        
+        return res
+        
+
+    def compactness(x_t,co):
+        e = 10**(-8)
+        com=0
+        result=0 
+        
+        for i in range(len(co)):
+            count = 0
+            for j in range(len(co[i])):
+                s = abs(x_t[i][j]-co[i][j])
+                if s>e:
+                    count += 1
+            com += (1/len(co[i])) * count
+            
+        result = (1/len(co)) * com
+        
+        return result
+
+
+    objs = [prob_class, dis_measure, inst_change]
+    constr_ieq = [c1, c2]
+    
+    n_var = 150   
+    
+    problem = FunctionalProblem(n_var,objs,constr_ieq=constr_ieq)
+    
+    r=[]
+    
+    algorithm = NSGA2(pop_size=10,sampling=ts1,crossover=get_crossover("real_de"),mutation=get_mutation("perm_inv"),eliminate_duplicates=False)
+    res = minimize(problem, algorithm)
+    
+    X = res.X
+    F = res.F
+    
+    result = {}
+    no_coun = 0
+    wrong_cla = 0
+    
+    counterfactual,best_key,no_coun,wrong_cla = best_ts(X,F)
+    
+    if no_coun == 1:
+        no_counterfactual += 1 
+        print('no_counterfactual')
+    elif wrong_cla == 1:
+        classified_different += 1
+        print('classified_different')
+    else:
+        counterfactual=np.reshape(counterfactual,(1,len(counterfactual)))
+        print('******')
+        print(F[best_key])
+        print('******')
+        C2_av += F[best_key][1]
+        C3_av += F[best_key][2]
+        cos_t.append(cost(ts1,counterfactual))
+        comp.append(compactness(ts1,counterfactual))
+
+C2_av = C2_av/(len(ser)-no_counterfactual-classified_different)
+C3_av = C3_av/(len(ser)-no_counterfactual-classified_different)
+
+t1 = time.time()    
+print(t1-t0)
+av_cost = sum(cos_t)/len(cos_t)
+av_comp = sum(comp)/len(comp)
+
+# Counterfactuals
+
+cknn = KNeighborsCounterfactual()
+cknn.fit(knn)
+
+sfc = ShapeletForestCounterfactual()
+sfc.fit(clf)
+
+counterfactual11, success11 =cknn.transform(ser, y_desired)
+#correct11 = counterfactual11[success11] 
+
+counterfactual12, success12 = sfc.transform(ser, y_desired)
+#correct12 = counterfactual12[success12] 
+
+def cost(x_t,co):
+    res=0
+   
+    for i in range(len(co)):
+        e=0
+        for j in range(len(co[i])):
+            e = e + ((x_t[i][j]-co[i][j]))**2
+        res += np.sqrt(e)
+    res = (1/len(co)) * res
+    
+    return res
+    
+
+def compactness(x_t,co):
+    e = 10**(-8)
+    com=0
+    result=0 
+    
+    for i in range(len(co)):
+        count = 0
+        for j in range(len(co[i])):
+            s = abs(x_t[i][j]-co[i][j])
+            if s>e:
+                count += 1
+        com += (1/len(co[i])) * count
+        
+    result = (1/len(co)) * com
+    
+    return result
+
+
+
+    
+cost1 = cost(ser,counterfactual11)
+com1 = compactness(ser,counterfactual11)
+
+cost2 = cost(ser,counterfactual12)
+com2 = compactness(ser,counterfactual12)
+
+counterfactual = counterfactual[0].tolist()
+ser = ser[-1].tolist()
+
+a = counterfactual11[-1].tolist()
+b = counterfactual12[-1].tolist() 
+
+xx = list(range(1,151)) 
+
+plt.title("Gun Point") 
+plt.xlabel("Time")
+plt.ylabel("V") 
+plt.plot(xx,ser,'r',zorder=4)
+plt.plot(xx,counterfactual,'b',zorder=3)
+plt.plot(xx,a,'g',zorder=2)
+plt.plot(xx,b,'y',zorder=1)
+
+plt.legend(['Original','MOC','KNN','RSF'])
+plt.show()
